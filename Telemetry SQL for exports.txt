@@ -1,11 +1,11 @@
-﻿USE [FaceToFaceCa]
+USE Database
 GO
-/****** Object:  StoredProcedure [dbo].[IFSTelemetryExports]    Script Date: 14/11/2016 16:01:51 ******/
+/****** Object:  StoredProcedure [dbo].[TelemetryExports]    Script Date: 14/11/2016 16:01:51 ******/
 SET ANSI_NULLS ON
 GO
 SET QUOTED_IDENTIFIER ON
 GO
-ALTER PROCEDURE [dbo].[IFSTelemetryExports]
+ALTER PROCEDURE [dbo].[TelemetryExports]
 	@DatabaseName VARCHAR(100),
 	@FromDate DATE,
 	@ToDate DATE
