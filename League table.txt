@@ -1,11 +1,11 @@
-﻿USE [FaceToFaceCa]
+USE Database
 GO
-/****** Object:  StoredProcedure [dbo].[IFSLeagueTableViews]    Script Date: 14/11/2016 14:32:46 ******/
+/****** Object:  StoredProcedure [dbo].[LeagueTableViews]    Script Date: 14/11/2016 14:32:46 ******/
 SET ANSI_NULLS ON
 GO
 SET QUOTED_IDENTIFIER ON
 GO
-ALTER PROCEDURE [dbo].[IFSLeagueTableViews]
+ALTER PROCEDURE [dbo].[LeagueTableViews]
 AS
 
 	SET NOCOUNT ON;
@@ -44,15 +44,15 @@ AS
 	DECLARE @CurrentCustomerId INT = 1
 	DECLARE @Exists INT
 	DECLARE @EmailHTML NVARCHAR(MAX)
-	DECLARE @EmailSubject NVARCHAR(75) = 'IFS Web Portal Usage Leaderboard'
+	DECLARE @EmailSubject NVARCHAR(75) = 'Web Portal Usage Leaderboard'
 
 	-- Destroy the main temporary table if it already exists
-	IF EXISTS(SELECT [name] FROM tempdb.sys.tables WHERE [name] LIKE '#IFSViews%')
+	IF EXISTS(SELECT [name] FROM tempdb.sys.tables WHERE [name] LIKE '#Views%')
 	BEGIN
-		DROP TABLE #IFSViews
+		DROP TABLE #Views
 	END
 
-	CREATE TABLE #IFSViews
+	CREATE TABLE #Views
 	(
 		CustomerName VARCHAR(100),
 		FirstName VARCHAR(100),
@@ -73,14 +73,14 @@ AS
 		NotViewedYear VARCHAR(800)
 	)
 		
-	-- Harvest IFS customer data
-	EXEC FaceToFaceCa.dbo.IFSCustomerDetails
+	-- Harvest  customer data
+	EXEC FaceToFaceCa.dbo.CustomerDetails
 
-	-- Loop through all IFS customers
-	WHILE @CurrentCustomerId <= (SELECT MAX(CustomerId) FROM ##IFSCustomerDetails)
+	-- Loop through all customers
+	WHILE @CurrentCustomerId <= (SELECT MAX(CustomerId) FROM ##CustomerDetails)
 	BEGIN
 		-- Grab important details
-		SELECT @CustomerName = CustomerName, @DatabaseName = DatabaseName FROM ##IFSCustomerDetails WHERE CustomerId = @CurrentCustomerId
+		SELECT @CustomerName = CustomerName, @DatabaseName = DatabaseName FROM ##CustomerDetails WHERE CustomerId = @CurrentCustomerId
 
 		-- This section extracts the row data from Web Item table and stores it in one string
 		-- when the Type column is equal to 0
@@ -190,7 +190,7 @@ AS
 		-- the web portal by user.
 		SET @SQLQueryString =
 			N'IF (EXISTS(SELECT * FROM ' + @DatabaseName + '.INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = ''tblTelemetry'')) ' + 
-			N'INSERT INTO #IFSViews (CustomerName, FirstName, Surname, ViewsLMonth, ViewsPrevMonth, Logins, PrevLogins, UserMostViewed, UserLeastViewed, CustMostViewed, CustLeastViewed, CustNotViewed, NotViewedYear) ' +
+			N'INSERT INTO #Views (CustomerName, FirstName, Surname, ViewsLMonth, ViewsPrevMonth, Logins, PrevLogins, UserMostViewed, UserLeastViewed, CustMostViewed, CustLeastViewed, CustNotViewed, NotViewedYear) ' +
 			N'SELECT ''' + @CustomerName + ''' AS CustomerName, tuser.FirstName, tuser.Surname, ' +
 			---------------------------------------------------------------------------------------
 			-------------------------- This Months viewed reports by user -------------------------
@@ -335,7 +335,7 @@ AS
 	END
 
 	-- Shows the created Table
-	--SELECT * FROM #IFSViews
+	--SELECT * FROM #Views
 	/*
 	-- Shows the customer email table
 	SELECT s.CustomerName,
@@ -350,7 +350,7 @@ AS
 				(SUM(s.ViewsLMonth) - SUM(s.ViewsPrevMonth)),
 				CASE WHEN SUM(s.ViewsLMonth) = 0 THEN 'No views' ELSE s.CustMostViewed END,
 				CASE WHEN SUM(s.ViewsLMonth) = 0 THEN 'No views' ELSE s.CustLeastViewed END
-			FROM #IFSViews s
+			FROM #Views s
 			GROUP BY s.CustomerName, s.CustMostViewed, s.CustLeastViewed
 			ORDER BY SUM(s.ViewsLMonth) DESC
 	*/
@@ -392,7 +392,7 @@ AS
 				td	= (SUM(s.ViewsLMonth) - SUM(s.ViewsPrevMonth)), '',
 				td	= CASE WHEN SUM(s.ViewsLMonth) = 0 THEN 'No views' ELSE s.CustMostViewed END, '',
 				td	= CASE WHEN SUM(s.ViewsLMonth) = 0 THEN 'No views' ELSE s.CustLeastViewed END
-			FROM #IFSViews s
+			FROM #Views s
 			GROUP BY s.CustomerName, s.CustMostViewed, s.CustLeastViewed
 			ORDER BY SUM(s.ViewsLMonth) DESC
 			FOR XML PATH('tr')) +
@@ -404,7 +404,7 @@ AS
 		N'</tr>' +
 		(SELECT thn	= s.CustomerName, '',
 				td	= s.CustNotViewed
-			FROM #IFSViews s
+			FROM #Views s
 			GROUP BY s.CustomerName, s.CustNotViewed
 			FOR XML PATH('tr')) +
 		N'<tr></tr></table>' +
@@ -415,7 +415,7 @@ AS
 		N'</tr>' +
 		(SELECT thn	= s.CustomerName, '',
 				td	= s.NotViewedYear
-			FROM #IFSViews s
+			FROM #Views s
 			GROUP BY s.CustomerName, s.NotViewedYear
 			FOR XML PATH('tr')) +
 		N'<tr></tr></table>' +
@@ -446,7 +446,7 @@ AS
 				td	= (s.ViewsLMonth - s.ViewsPrevMonth), '',
 				td	= s.UserMostViewed, '',
 				td	= s.UserLeastViewed
-			FROM #IFSViews s
+			FROM #Views s
 			ORDER BY s.ViewsLMonth DESC
 			FOR XML PATH('tr')) +
 		N'<tr></tr>' +
@@ -461,8 +461,7 @@ AS
 	EXEC msdb.dbo.sp_send_dbmail
 		@body							= @EmailHTML,
 		@body_format					= 'HTML',
-		@recipients						= 'patrick.collins@idealhost.co.uk;daniel.marshall@idealhost.co.uk;rob.anderson@idealhost.co.uk;george.griffiths@idealhost.co.uk',
---		@recipients						= 'george.griffiths@idealhost.co.uk',
+		@recipients						= 'george.griffiths@emailaddress.co.uk',
 		@subject						= @EmailSubject
 		
 		
