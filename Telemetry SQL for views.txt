@@ -1,0 +1,92 @@
+﻿USE [FaceToFaceCa]
+GO
+/****** Object:  StoredProcedure [dbo].[IFSTelemetryViews]    Script Date: 14/11/2016 16:42:33 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER PROCEDURE [dbo].[IFSTelemetryViews]
+	@DatabaseName AS VARCHAR(100),
+	@FromDate DATE,
+	@ToDate DATE
+AS
+
+	SET NOCOUNT ON;
+	
+	-- ===========================================================================
+	-- Author:		George Griffiths
+	-- Create Date:		03-11-2016
+	-- Description:		Checks the Telemetry usage for views
+	-- ===========================================================================
+	
+	-- Declare Vaibles being used
+
+	DECLARE @NameViewSQL AS NVARCHAR(MAX)
+	DECLARE @NameView AS NVARCHAR(MAX)
+	DECLARE @NameViewRep AS NVARCHAR(MAX)
+	DECLARE @SQLQueryString AS NVARCHAR(MAX)
+	DECLARE @SQLParams AS NVARCHAR(MAX) = N'@cnt AS NVARCHAR(MAX) OUTPUT'
+
+	-- This section extracts the row data from Telemetry table and stores it in one string
+	-- when the Controller column is equal to Report
+
+	SELECT @NameViewSQL = 'SELECT @cnt = (STUFF((SELECT DISTINCT '','' + QUOTENAME(webi.[Name]) 
+						FROM [' + @DatabaseName + '].dbo.tlkpWebItem webi 
+						WHERE webi.[Type] = 0 
+						FOR XML PATH(''''), TYPE).value(''.'', ''NVARCHAR(MAX)''), 1, 1, '''')) '
+	EXECUTE sp_executesql @NameViewSQL, @SQLParams, @cnt = @NameView OUTPUT
+
+	SET @NameViewRep = REPLACE(REPLACE(@NameView,'[',''''),']','''')
+
+	-- SQL query below counts how many reports have been viewed of each type from 
+	-- the web portal by user.
+	SET @SQLQueryString =
+			N'WITH ViewTable AS ( ' +
+			N'SELECT logtel.[UserId], webi.[Name] ' +
+			N'FROM [' + @DatabaseName + '].[Logging].[tblTelemetry] logtel ' +
+			N'LEFT JOIN [' + @DatabaseName + '].[dbo].[tlkpWebItem] webi ON ' +
+			-- The below code checks the names used in Action and saved in the message to link to
+			-- the WebItem table. This is to keep the structure even if the name has not been used.
+			N'(UPPER(CASE WHEN logtel.[Message] LIKE ''%viewed%'' ' +
+			N'THEN SUBSTRING(logtel.[Message], ' +
+			N'CHARINDEX(''viewed'', logtel.[Message]) + LEN(''vieweda''), ' +
+			N'CHARINDEX(''.'', logtel.[Message]) - ' +
+			N'CHARINDEX(''viewed'', logtel.[Message]) - ' +
+			N'LEN(''vieweda'')) ' +
+			N'ELSE NULL END)) = UPPER(webi.[Name]) ' +
+			N'OR UPPER( CASE logtel.[Action] WHEN ''SignupAgeRange'' THEN ''Signups By Age'' ELSE logtel.[Action] END) = UPPER(webi.[Name]) '+
+			N'OR UPPER(logtel.[Action]) + ''s'' = UPPER(webi.[Name]) ' +
+			N'WHERE logtel.Controller = ''Report'' AND logtel.[Message] LIKE ''%viewed%'' AND webi.[Type] = 0 ' +
+			N'AND logtel.UserId IS NOT NULL ' +
+			N'AND logtel.CreateDate BETWEEN ''' + CONVERT(VARCHAR, @FromDate) + ''' AND ''' + CONVERT(VARCHAR, @ToDate) + ''' ' +
+			N') ' +
+		N'SELECT tuser.FirstName, tuser.Surname, ' +
+		-- The same as the with statement above, to sum only those records that
+		-- are matching with the criteria from WebItem table.
+		N'SUM(CASE ' + 
+		N'WHEN( CASE WHEN logtel.[Message] LIKE ''%viewed%'' ' +
+		N'THEN SUBSTRING(logtel.[Message], ' +
+		N'CHARINDEX(''viewed'', logtel.[Message]) + LEN(''vieweda''), ' +
+		N'CHARINDEX(''.'', logtel.[Message]) -  ' +
+		N'CHARINDEX(''viewed'', logtel.[Message]) - ' +
+		N'LEN(''vieweda'')) ' +
+		N'ELSE NULL END) IN (' + @NameViewRep + ') THEN 1 ' +
+		N'WHEN CASE logtel.[Action] WHEN ''SignupAgeRange'' THEN ''Signups By Age'' ELSE logtel.[Action] END IN (' + @NameViewRep + ') THEN 1 ' +
+		N'WHEN logtel.[Action] + ''s'' IN (' + @NameViewRep + ') THEN 1 ' +
+		N'ELSE 0 END) AS [ReportsViewed], ' +
+		N'' + @NameView + ' ' +
+		N'FROM [' + @DatabaseName + '].Logging.tblTelemetry logtel ' +
+		N'RIGHT JOIN [' + @DatabaseName + '].dbo.tblUser tuser ON logtel.UserId = tuser.Id ' +
+		N'INNER JOIN ( ' +
+			N'SELECT * FROM ViewTable ' +
+			N'PIVOT(COUNT([Name]) FOR [Name] IN (' + @NameView + ')) AS PivotViewTable ' +
+		N') ViewTable ON logtel.UserId = ViewTable.UserId ' +
+		N'WHERE logtel.CreateDate BETWEEN ''' + CONVERT(VARCHAR, @FromDate) + ''' AND ''' + CONVERT(VARCHAR, @ToDate) + ''' ' +
+		N'AND logtel.Controller = ''Report'' ' + 
+		N'AND logtel.[Message] LIKE ''%viewed%'' ' +
+		N'AND tuser.Surname <> ''' + 'Admin' + ''' ' + 
+		N'AND tuser.Surname <> ''' + 'Administrator' + ''' ' +
+		N'GROUP BY logtel.UserId, tuser.FirstName, tuser.Surname, ' + @NameView + ' ' +
+		N'ORDER BY [ReportsViewed] Desc '
+
+		EXEC(@SQLQueryString)

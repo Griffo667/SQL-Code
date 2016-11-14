@@ -1,0 +1,468 @@
+﻿USE [FaceToFaceCa]
+GO
+/****** Object:  StoredProcedure [dbo].[IFSLeagueTableViews]    Script Date: 14/11/2016 14:32:46 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER PROCEDURE [dbo].[IFSLeagueTableViews]
+AS
+
+	SET NOCOUNT ON;
+	-- ===========================================================================
+	-- Author:			George Griffiths
+	-- Create Date:		08-11-2016
+	-- Description:		League Table for all customers views
+	-- ===========================================================================
+	-- Declare Vaibles being used
+
+	DECLARE @NameViewSQL AS NVARCHAR(MAX)
+	DECLARE @NameView AS NVARCHAR(MAX)
+	DECLARE @NameViewRep AS NVARCHAR(MAX)
+	DECLARE @ActionsSQL AS NVARCHAR(MAX)
+	DECLARE @Actions AS NVARCHAR(MAX)
+	DECLARE @ActionsRep AS NVARCHAR(MAX)
+	DECLARE @NotViewedSQL AS NVARCHAR(MAX)
+	DECLARE @NotViewed AS NVARCHAR(MAX)
+	DECLARE @NotViewedRep AS NVARCHAR(MAX)
+	DECLARE @NotViewedY2DSQL AS NVARCHAR(MAX)
+	DECLARE @NotViewedY2D AS NVARCHAR(MAX)
+	DECLARE @NotViewedY2DRep AS NVARCHAR(MAX)
+	DECLARE @SQLQueryString AS NVARCHAR(MAX)
+	DECLARE @MonthStart AS VARCHAR(8) = CONVERT(VARCHAR, DATEADD(MONTH, DATEDIFF(MONTH, 0, DATEADD(DAY, -1, GETDATE())) -1, 0), 112)
+	DECLARE @MonthEnd AS VARCHAR(8) = CONVERT(VARCHAR, DATEADD(MONTH, DATEDIFF(MONTH, 0, DATEADD(DAY, -1, GETDATE())), -1), 112)
+	DECLARE @PrevMonthStart AS VARCHAR(8) = CONVERT(VARCHAR, DATEADD(MONTH, DATEDIFF(MONTH, 0, DATEADD(DAY, -1, GETDATE())) -2, 0), 112)
+	DECLARE @PrevMonthEnd AS VARCHAR(8) = CONVERT(VARCHAR, DATEADD(MONTH, DATEDIFF(MONTH, 0, DATEADD(DAY, -1, GETDATE())) -1, -1), 112)
+	DECLARE @YearStart AS VARCHAR(8) = CONVERT(VARCHAR, DATEADD(YEAR, DATEDIFF(YEAR, 0, GETDATE()), 0), 112)
+	DECLARE @YearEnd AS VARCHAR(8) = CONVERT(VARCHAR, DATEADD(YEAR, DATEDIFF(YEAR, 0, GETDATE()) +1, -1), 112)
+	DECLARE @SQLParams AS NVARCHAR(MAX) = N'@cnt AS NVARCHAR(MAX) OUTPUT'
+	DECLARE @SQLParamsActs AS NVARCHAR(MAX) = N'@acts AS NVARCHAR(MAX) OUTPUT'
+	DECLARE @SQLParamsNV AS NVARCHAR(MAX) = N'@nv AS NVARCHAR(MAX) OUTPUT'
+	DECLARE @SQLParamsY2DNV AS NVARCHAR(MAX) = N'@y2dnv AS NVARCHAR(MAX) OUTPUT'
+	DECLARE @CustomerName VARCHAR(100)
+	DECLARE @DatabaseName VARCHAR(150)
+	DECLARE @CurrentCustomerId INT = 1
+	DECLARE @Exists INT
+	DECLARE @EmailHTML NVARCHAR(MAX)
+	DECLARE @EmailSubject NVARCHAR(75) = 'IFS Web Portal Usage Leaderboard'
+
+	-- Destroy the main temporary table if it already exists
+	IF EXISTS(SELECT [name] FROM tempdb.sys.tables WHERE [name] LIKE '#IFSViews%')
+	BEGIN
+		DROP TABLE #IFSViews
+	END
+
+	CREATE TABLE #IFSViews
+	(
+		CustomerName VARCHAR(100),
+		FirstName VARCHAR(100),
+		Surname VARCHAR(100),
+		ViewsLMonth INT DEFAULT 0,
+		ViewsPrevMonth INT DEFAULT 0,
+		Logins INT DEFAULT 0,
+		PrevLogins INT DEFAULT 0,
+		UserMostViewed VARCHAR(100),
+		UserLeastViewed VARCHAR(100),
+		--UserMostViewedAmount INT DEFAULT 0,
+		--UserLeastViewedAmount INT DEFAULT 0,
+		CustMostViewed VARCHAR(100),
+		CustLeastViewed VARCHAR(100),
+		--CustMostViewedAmount INT DEFAULT 0,
+		--CustLeastViewedAmount INT DEFAULT 0
+		CustNotViewed VARCHAR(800),
+		NotViewedYear VARCHAR(800)
+	)
+		
+	-- Harvest IFS customer data
+	EXEC FaceToFaceCa.dbo.IFSCustomerDetails
+
+	-- Loop through all IFS customers
+	WHILE @CurrentCustomerId <= (SELECT MAX(CustomerId) FROM ##IFSCustomerDetails)
+	BEGIN
+		-- Grab important details
+		SELECT @CustomerName = CustomerName, @DatabaseName = DatabaseName FROM ##IFSCustomerDetails WHERE CustomerId = @CurrentCustomerId
+
+		-- This section extracts the row data from Web Item table and stores it in one string
+		-- when the Type column is equal to 0
+
+		SELECT @NameViewSQL = 'IF (EXISTS(SELECT * FROM ' + @DatabaseName + '.INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = ''tblTelemetry''))
+							SELECT @cnt = (STUFF((SELECT DISTINCT '','' + QUOTENAME(webi.[Name]) 
+							FROM ' + @DatabaseName + '.dbo.tlkpWebItem webi 
+							WHERE webi.[Type] = 0 
+							FOR XML PATH(''''), TYPE).value(''.'', ''NVARCHAR(MAX)''), 1, 1, '''')) '
+		EXECUTE sp_executesql @NameViewSQL, @SQLParams, @cnt = @NameView OUTPUT
+		
+		-- This strips away [ and ] and replaces with '
+
+		SET @NameViewRep = REPLACE(REPLACE(@NameView,'[',''''),']','''')
+
+		-- This section extracts the row data from Telemetry table and stores it in one string
+		-- when the Controller column is equal to Report
+
+		SELECT @ActionsSQL = 'IF (EXISTS(SELECT * FROM ' + @DatabaseName + '.INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = ''tblTelemetry''))
+							SELECT @acts = (STUFF((SELECT DISTINCT '','' + QUOTENAME(logtel.[Action]) 
+							FROM ' + @DatabaseName + '.Logging.tblTelemetry logtel 
+							WHERE logtel.[Action] = (CASE WHEN logtel.CreateDate BETWEEN ''' + @PrevMonthStart + ''' AND ''' + @MonthEnd + ''' THEN
+									(CASE WHEN( CASE WHEN logtel.[Message] LIKE ''%viewed%'' 
+									THEN SUBSTRING(logtel.[Message], 
+									CHARINDEX(''viewed'', logtel.[Message]) + LEN(''vieweda''), 
+									CHARINDEX(''.'', logtel.[Message]) -  
+									CHARINDEX(''viewed'', logtel.[Message]) - 
+									LEN(''vieweda'')) 
+									ELSE NULL END) IN (' + @NameViewRep + ') THEN logtel.[Action] 
+									WHEN CASE logtel.[Action] WHEN ''SignupAgeRange'' THEN ''Signups By Age'' ELSE logtel.[Action] END IN (' + @NameViewRep + ') THEN logtel.[Action] 
+									WHEN logtel.[Action] + ''s'' IN (' + @NameViewRep + ') THEN logtel.[Action] 
+									ELSE NULL END) ELSE NULL END)
+							AND logtel.[Action] <> ''Dashboard''
+							GROUP BY logtel.[Action]
+							FOR XML PATH(''''), TYPE).value(''.'', ''NVARCHAR(MAX)''), 1, 1, '''')) '
+		EXECUTE sp_executesql @ActionsSQL, @SQLParamsActs, @acts = @Actions OUTPUT
+		
+		-- This strips away [ and ] and replaces with '
+
+		SET @ActionsRep = REPLACE(REPLACE(@Actions,'[',''''),']','''')
+
+		-- This section check Web Item table against Telemetry table and stores the Web Item Name
+		-- in a string when it does not appear in the Telemetry table and when the Type is equal to 0
+
+		SELECT @NotViewedSQL = 'IF (EXISTS(SELECT * FROM ' + @DatabaseName + '.INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = ''tblTelemetry''))
+							SELECT @nv = (STUFF((SELECT DISTINCT '', '' + QUOTENAME(webi.[Name]) 
+							FROM ' + @DatabaseName + '.Logging.tblTelemetry logtel 
+							LEFT JOIN ' + @DatabaseName + '.dbo.tblUser tuser ON tuser.Id = logtel.UserId
+							RIGHT OUTER JOIN ' + @DatabaseName + '.dbo.tlkpWebItem webi 
+							ON (CASE WHEN logtel.CreateDate BETWEEN ''' + @MonthStart + ''' AND ''' + @MonthEnd + ''' 
+								AND tuser.Surname <> ''Admin'' AND tuser.Surname <> ''Administrator'' THEN
+								(CASE WHEN logtel.[Message] LIKE ''%viewed%''
+								THEN SUBSTRING(logtel.[Message],
+								CHARINDEX(''viewed'', logtel.[Message]) + LEN(''vieweda''),
+								CHARINDEX(''.'', logtel.[Message]) -
+								CHARINDEX(''viewed'', logtel.[Message]) -
+								LEN(''vieweda''))
+								ELSE NULL END) ELSE NULL END) = webi.[Name]
+								OR CASE WHEN logtel.CreateDate BETWEEN ''' + @MonthStart + ''' AND ''' + @MonthEnd + '''
+								AND tuser.Surname <> ''Admin'' AND tuser.Surname <> ''Administrator'' THEN 
+								(CASE logtel.[Action] WHEN ''SignupAgeRange'' THEN ''Signups By Age'' ELSE logtel.[Action] END) ELSE NULL END = webi.[Name]
+								OR CASE WHEN logtel.CreateDate BETWEEN ''' + @MonthStart + ''' AND ''' + @MonthEnd + '''
+								AND tuser.Surname <> ''Admin'' AND tuser.Surname <> ''Administrator'' THEN logtel.[Action] + ''s'' ELSE NULL END = webi.[Name]
+							WHERE webi.[Type] = 0 
+							AND logtel.[Action] IS NULL
+							GROUP BY webi.Name
+							FOR XML PATH(''''), TYPE).value(''.'', ''NVARCHAR(MAX)''), 1, 1, '''')) '
+		EXECUTE sp_executesql @NotViewedSQL, @SQLParamsNV, @nv = @NotViewed OUTPUT
+		
+		-- This strips away [ and ] and replaces with '
+
+		SET @NotViewedRep = REPLACE(REPLACE(@NotViewed,'[',''),']','')
+
+		-- This section check Web Item table against Telemetry table and stores the Web Item Name
+		-- in a string when it does not appear in the Telemetry table and when the Type is equal to 0
+
+		SELECT @NotViewedY2DSQL = 'IF (EXISTS(SELECT * FROM ' + @DatabaseName + '.INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = ''tblTelemetry''))
+							SELECT @y2dnv = (STUFF((SELECT DISTINCT '', '' + QUOTENAME(webi.[Name]) 
+							FROM ' + @DatabaseName + '.Logging.tblTelemetry logtel 
+							LEFT JOIN ' + @DatabaseName + '.dbo.tblUser tuser ON tuser.Id = logtel.UserId
+							RIGHT OUTER JOIN ' + @DatabaseName + '.dbo.tlkpWebItem webi 
+							ON (CASE WHEN logtel.CreateDate BETWEEN ''' + @YearStart + ''' AND ''' + @YearEnd + ''' 
+								AND tuser.Surname <> ''Admin'' AND tuser.Surname <> ''Administrator'' THEN
+								(CASE WHEN logtel.[Message] LIKE ''%viewed%''
+								THEN SUBSTRING(logtel.[Message],
+								CHARINDEX(''viewed'', logtel.[Message]) + LEN(''vieweda''),
+								CHARINDEX(''.'', logtel.[Message]) -
+								CHARINDEX(''viewed'', logtel.[Message]) -
+								LEN(''vieweda''))
+								ELSE NULL END) ELSE NULL END) = webi.[Name]
+								OR CASE WHEN logtel.CreateDate BETWEEN ''' + @YearStart + ''' AND ''' + @YearEnd + '''
+								AND tuser.Surname <> ''Admin'' AND tuser.Surname <> ''Administrator'' THEN 
+								(CASE logtel.[Action] WHEN ''SignupAgeRange'' THEN ''Signups By Age'' ELSE logtel.[Action] END) ELSE NULL END = webi.[Name]
+								OR CASE WHEN logtel.CreateDate BETWEEN ''' + @YearStart + ''' AND ''' + @YearEnd + '''
+								AND tuser.Surname <> ''Admin'' AND tuser.Surname <> ''Administrator'' THEN logtel.[Action] + ''s'' ELSE NULL END = webi.[Name]
+							WHERE webi.[Type] = 0 
+							AND logtel.[Action] IS NULL
+							GROUP BY webi.Name
+							FOR XML PATH(''''), TYPE).value(''.'', ''NVARCHAR(MAX)''), 1, 1, '''')) '
+		EXECUTE sp_executesql @NotViewedY2DSQL, @SQLParamsY2DNV, @y2dnv = @NotViewedY2D OUTPUT
+		
+		-- This strips away [ and ] and replaces with '
+
+		SET @NotViewedY2DRep = REPLACE(REPLACE(@NotViewedY2D,'[',''),']','')
+
+		-- SQL query below counts how many reports have been viewed of each type from 
+		-- the web portal by user.
+		SET @SQLQueryString =
+			N'IF (EXISTS(SELECT * FROM ' + @DatabaseName + '.INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = ''tblTelemetry'')) ' + 
+			N'INSERT INTO #IFSViews (CustomerName, FirstName, Surname, ViewsLMonth, ViewsPrevMonth, Logins, PrevLogins, UserMostViewed, UserLeastViewed, CustMostViewed, CustLeastViewed, CustNotViewed, NotViewedYear) ' +
+			N'SELECT ''' + @CustomerName + ''' AS CustomerName, tuser.FirstName, tuser.Surname, ' +
+			---------------------------------------------------------------------------------------
+			-------------------------- This Months viewed reports by user -------------------------
+			---------------------------------------------------------------------------------------
+			N'SUM(CASE WHEN logtel.CreateDate BETWEEN ''' + @MonthStart + ''' AND ''' + @MonthEnd + ''' THEN ' + 
+			N'(CASE WHEN logtel.[Action] IN (' + @ActionsRep + ') THEN 1 ELSE 0 END) ELSE 0 END) AS [ReportsViewed], ' +
+			---------------------------------------------------------------------------------------
+			-------------------------- Last Months viewed reports by user -------------------------
+			---------------------------------------------------------------------------------------
+			N'SUM(CASE WHEN logtel.CreateDate BETWEEN ''' + @PrevMonthStart + ''' AND ''' + @PrevMonthEnd + ''' THEN ' + 
+			N'(CASE WHEN logtel.[Action] IN (' + @ActionsRep + ') THEN 1 ELSE 0 END) ELSE 0 END) AS [PrevReportsViewed], ' +
+			---------------------------------------------------------------------------------------
+			----------------------------- This Months Loggins by user -----------------------------
+			---------------------------------------------------------------------------------------
+			N'SUM(CASE WHEN logtel.CreateDate BETWEEN ''' + @MonthStart + ''' AND ''' + @MonthEnd + ''' THEN ' + 
+			N'(CASE WHEN logtel.[Message] LIKE ''%logged in%'' THEN 1 ELSE 0 END) ELSE 0 END) AS [Logins], ' +
+			---------------------------------------------------------------------------------------
+			----------------------------- Last Months Loggins by user -----------------------------
+			---------------------------------------------------------------------------------------
+			N'SUM(CASE WHEN logtel.CreateDate BETWEEN ''' + @PrevMonthStart + ''' AND ''' + @PrevMonthEnd + ''' THEN ' + 
+			N'(CASE WHEN logtel.[Message] LIKE ''%logged in%'' THEN 1 ELSE 0 END) ELSE 0 END) AS [PrevLogins], ' +
+			---------------------------------------------------------------------------------------
+			----------------------------- Most viewed report by user ------------------------------
+			---------------------------------------------------------------------------------------
+			N'(SELECT TOP 1 ltel.[Action] ' +
+				N'FROM ' + @DatabaseName + '.Logging.tblTelemetry ltel ' +
+				N'WHERE ltel.[Action] IN (' + @ActionsRep + ') ' +
+				N'AND ltel.CreateDate BETWEEN ''' + @MonthStart + ''' AND ''' + @MonthEnd + ''' ' +
+				N'AND ltel.Controller = ''Report'' ' +  
+				N'AND ltel.[Message] LIKE ''%viewed%'' ' +
+				N'AND ltel.[Action] <> ''Dashboard'' ' +
+				N'AND ltel.UserId = logtel.UserId ' +
+				N'GROUP BY ltel.UserId, ltel.[Action] ORDER BY COUNT(ltel.[Action]) DESC) AS UserMostViewed, ' +
+			---------------------------------------------------------------------------------------
+			----------------------------- Least viewed report by user -----------------------------
+			---------------------------------------------------------------------------------------
+			N'(SELECT TOP 1 ltel.[Action] ' +
+				N'FROM ' + @DatabaseName + '.Logging.tblTelemetry ltel ' +
+				N'WHERE ltel.[Action] IN (' + @ActionsRep + ') ' +
+				N'AND ltel.CreateDate BETWEEN ''' + @MonthStart + ''' AND ''' + @MonthEnd + ''' ' +
+				N'AND ltel.Controller = ''Report'' ' +  
+				N'AND ltel.[Message] LIKE ''%viewed%'' ' +
+				N'AND ltel.[Action] <> ''Dashboard'' ' +
+				N'AND ltel.UserId = logtel.UserId ' +
+				N'GROUP BY ltel.UserId, ltel.[Action] ORDER BY COUNT(ltel.[Action]) ASC) AS UserLeastViewed, ' +
+			---------------------------------------------------------------------------------------
+			------------------------ Amount of Most viewed report by user -------------------------
+			---------------------------------------------------------------------------------------
+			--N'(SELECT TOP 1 COUNT(ltel.[Action]) ' +
+			--	N'FROM ' + @DatabaseName + '.Logging.tblTelemetry ltel ' +
+			--	N'WHERE ltel.[Action] IN (' + @ActionsRep + ') ' +
+			--	N'AND ltel.CreateDate BETWEEN ''' + @MonthStart + ''' AND ''' + @MonthEnd + ''' ' +
+			--	N'AND ltel.Controller = ''Report'' ' +  
+			--	N'AND ltel.[Message] LIKE ''%viewed%'' ' +
+			--	N'AND ltel.[Action] <> ''Dashboard'' ' +
+			--	N'AND ltel.UserId = logtel.UserId ' +
+			--	N'GROUP BY ltel.UserId, ltel.[Action] ORDER BY COUNT(ltel.[Action]) DESC) AS UserMostViewedAmount, ' +
+			---------------------------------------------------------------------------------------
+			----------------------- Amount of Least viewed report by user -------------------------
+			---------------------------------------------------------------------------------------
+			--N'(SELECT TOP 1 COUNT(ltel.[Action]) ' +
+			--	N'FROM ' + @DatabaseName + '.Logging.tblTelemetry ltel ' +
+			--	N'WHERE ltel.[Action] IN (' + @ActionsRep + ') ' +
+			--	N'AND ltel.CreateDate BETWEEN ''' + @MonthStart + ''' AND ''' + @MonthEnd + ''' ' +
+			--	N'AND ltel.Controller = ''Report'' ' +  
+			--	N'AND ltel.[Message] LIKE ''%viewed%'' ' +
+			--	N'AND ltel.[Action] <> ''Dashboard'' ' +
+			--	N'AND ltel.UserId = logtel.UserId ' +
+			--	N'GROUP BY ltel.UserId, ltel.[Action] ORDER BY COUNT(ltel.[Action]) ASC) AS UserLeastViewedAmount, ' +
+			---------------------------------------------------------------------------------------
+			---------------------------- Most viewed report by customer ---------------------------
+			---------------------------------------------------------------------------------------
+			N'(SELECT TOP 1 ltel.[Action] ' +
+				N'FROM ' + @DatabaseName + '.Logging.tblTelemetry ltel ' +
+				N'WHERE ltel.[Action] IN (' + @ActionsRep + ') ' +
+				N'AND ltel.CreateDate BETWEEN ''' + @MonthStart + ''' AND ''' + @MonthEnd + ''' ' +
+				N'AND ltel.Controller = ''Report'' ' +  
+				N'AND ltel.[Message] LIKE ''%viewed%'' ' +
+				N'AND ltel.[Action] <> ''Dashboard'' ' +
+				N'GROUP BY ltel.[Action] ORDER BY COUNT(ltel.[Action]) DESC) AS CustMostViewed, ' +
+			---------------------------------------------------------------------------------------
+			---------------------------- Least viewed report by customer --------------------------
+			---------------------------------------------------------------------------------------
+			N'(SELECT TOP 1 ltel.[Action] ' +
+				N'FROM ' + @DatabaseName + '.Logging.tblTelemetry ltel ' +
+				N'WHERE ltel.[Action] IN (' + @ActionsRep + ') ' +
+				N'AND ltel.CreateDate BETWEEN ''' + @MonthStart + ''' AND ''' + @MonthEnd + ''' ' +
+				N'AND ltel.Controller = ''Report'' ' +  
+				N'AND ltel.[Message] LIKE ''%viewed%'' ' +
+				N'AND ltel.[Action] <> ''Dashboard'' ' +
+				N'GROUP BY ltel.[Action] ORDER BY COUNT(ltel.[Action]) ASC) AS CustLeastViewed, ' +
+			---------------------------------------------------------------------------------------
+			----------------------- Amount of Most viewed report by customer ----------------------
+			---------------------------------------------------------------------------------------
+			--N'(SELECT TOP 1 COUNT(ltel.[Action]) ' +
+			--	N'FROM ' + @DatabaseName + '.Logging.tblTelemetry ltel ' +
+			--	N'WHERE ltel.[Action] IN (' + @ActionsRep + ') ' +
+			--	N'AND ltel.CreateDate BETWEEN ''' + @MonthStart + ''' AND ''' + @MonthEnd + ''' ' +
+			--	N'AND ltel.Controller = ''Report'' ' +  
+			--	N'AND ltel.[Message] LIKE ''%viewed%'' ' +
+			--	N'AND ltel.[Action] <> ''Dashboard'' ' +
+			--	N'GROUP BY ltel.[Action] ORDER BY COUNT(ltel.[Action]) DESC) AS CustMostViewedAmount, ' +
+			---------------------------------------------------------------------------------------
+			---------------------- Amount of Least viewed report by customer ----------------------
+			---------------------------------------------------------------------------------------
+			--N'(SELECT TOP 1 COUNT(ltel.[Action]) ' +
+			--	N'FROM ' + @DatabaseName + '.Logging.tblTelemetry ltel ' +
+			--	N'WHERE ltel.[Action] IN (' + @ActionsRep + ') ' +
+			--	N'AND ltel.CreateDate BETWEEN ''' + @MonthStart + ''' AND ''' + @MonthEnd + ''' ' +
+			--	N'AND ltel.Controller = ''Report'' ' +  
+			--	N'AND ltel.[Message] LIKE ''%viewed%'' ' +
+			--	N'AND ltel.[Action] <> ''Dashboard'' ' +
+			--	N'GROUP BY ltel.[Action] ORDER BY COUNT(ltel.[Action]) ASC) AS CustLeastViewedAmount, ' +
+			---------------------------------------------------------------------------------------
+			-------------------------- Reports Not viewed by the customer -------------------------
+			---------------------------------------------------------------------------------------
+			N'(''' + @NotViewedRep + ''') AS CustNotViewed, ' +
+			---------------------------------------------------------------------------------------
+			----------------------- Reports Not viewed by the customer this year ------------------
+			---------------------------------------------------------------------------------------
+			N'(''' + @NotViewedY2DRep + ''') AS NotViewedYear ' +
+			---------------------------------------------------------------------------------------
+			---------------------------- Tables used and filter clauses ---------------------------
+			---------------------------------------------------------------------------------------
+			N'FROM ' + @DatabaseName + '.Logging.tblTelemetry logtel ' +
+			N'RIGHT JOIN ' + @DatabaseName + '.dbo.tblUser tuser ON logtel.UserId = tuser.Id ' +
+			N'WHERE logtel.CreateDate BETWEEN ''' + @PrevMonthStart + ''' AND ''' + @MonthEnd + ''' ' +
+			N'AND logtel.[Action] IN (' + @ActionsRep + ', ''Login'') ' +
+			N'AND (logtel.[Message] LIKE ''%Viewed%'' ' +
+			N'OR logtel.[Message] LIKE ''%logged in%'') ' +
+			N'AND tuser.Surname <> ''Admin'' ' + 
+			N'AND tuser.Surname <> ''Administrator'' ' +
+			N'GROUP BY logtel.UserId, tuser.FirstName, tuser.Surname '
+			
+		-- Run the new SQL Statement
+		EXEC(@SQLQueryString)
+	
+		-- Incrememnt the loop
+		SET @CurrentCustomerId = @CurrentCustomerId + 1
+
+	-- End customer loop
+	END
+
+	-- Shows the created Table
+	--SELECT * FROM #IFSViews
+	/*
+	-- Shows the customer email table
+	SELECT s.CustomerName,
+				SUM(CASE WHEN s.Logins = 0 THEN 0 ELSE 1 END),
+				SUM(s.ViewsLMonth),
+				SUM(s.Logins),
+				CAST(CASE WHEN SUM(s.ViewsLMonth) = 0 OR SUM(s.Logins) = 0 THEN 0 ELSE (CAST(SUM(s.ViewsLMonth) AS FLOAT) / CAST(SUM(s.Logins) AS FLOAT)) END AS DECIMAL(10,2)),
+				SUM(CASE WHEN s.PrevLogins = 0 THEN 0 ELSE 1 END),
+				SUM(s.ViewsPrevMonth),
+				SUM(s.PrevLogins),
+				CAST(CASE WHEN SUM(s.ViewsPrevMonth) = 0 OR SUM(s.PrevLogins) = 0 THEN 0 ELSE (CAST(SUM(s.ViewsPrevMonth) AS FLOAT) / CAST(SUM(s.PrevLogins) AS FLOAT)) END AS DECIMAL(10,2)),
+				(SUM(s.ViewsLMonth) - SUM(s.ViewsPrevMonth)),
+				CASE WHEN SUM(s.ViewsLMonth) = 0 THEN 'No views' ELSE s.CustMostViewed END,
+				CASE WHEN SUM(s.ViewsLMonth) = 0 THEN 'No views' ELSE s.CustLeastViewed END
+			FROM #IFSViews s
+			GROUP BY s.CustomerName, s.CustMostViewed, s.CustLeastViewed
+			ORDER BY SUM(s.ViewsLMonth) DESC
+	*/
+	-- Add the report date to the Subject
+	SET @EmailSubject = @EmailSubject + ' - ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @MonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @MonthStart)) AS VARCHAR))
+	
+	-- Build the HTML string for the email (malformed tags are deliberate)
+	SET @EmailHTML = 
+		N'<style>.forceArial { font-family:sans-serif; font-size:0.9em; } table { border-collapse: collapse; } td, th { padding: 3px; }' +
+		N'table, th, td { border: 1px solid #888; } th { background-color: #E0E0E0; }</style>' +
+		N'<font face="Arial, sans-serif">' +
+		N'<h3>Monthly Web Portal Usage</h3>' +
+		N'League of Customers for ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @MonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @MonthStart)) AS VARCHAR)) + ' and the best user.<br />' + 
+		N'Dashboard views have been ignored<br /><br />' +
+		N'<table class="forceArial">' +
+		N'<tr>' +
+		N'<thn>Customer</th>' +
+		N'<thn>User''s ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @MonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @MonthStart)) AS VARCHAR)) + '</th>' +
+		N'<thn>Views ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @MonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @MonthStart)) AS VARCHAR)) + '</th>' +
+		N'<thn>Logins ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @MonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @MonthStart)) AS VARCHAR)) + '</th>' +
+		N'<thn>Ave. Views per login ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @MonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @MonthStart)) AS VARCHAR)) + '</th>' +
+		N'<thn>User''s ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @PrevMonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @PrevMonthStart)) AS VARCHAR)) + '</th>' +
+		N'<thn>Views ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @PrevMonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @PrevMonthStart)) AS VARCHAR)) + '</th>' +
+		N'<thn>Logins ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @PrevMonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @PrevMonthStart)) AS VARCHAR)) + '</th>' +
+		N'<thn>Ave. Views per login ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @PrevMonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @PrevMonthStart)) AS VARCHAR)) + '</th>' +
+		N'<thn>Views diff. prev. month</th>' +
+		N'<thn>Most Viewed Report ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @MonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @MonthStart)) AS VARCHAR)) + '</th>' +
+		N'<thn>Least Viewed Report ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @MonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @MonthStart)) AS VARCHAR)) + '</th>' +
+		N'</tr>' +
+		(SELECT thn	= s.CustomerName, '',
+				td	= SUM(CASE WHEN s.Logins = 0 THEN 0 ELSE 1 END), '',
+				td	= SUM(s.ViewsLMonth), '',
+				td	= SUM(s.Logins), '',
+				td	= CAST(CASE WHEN SUM(s.ViewsLMonth) = 0 OR SUM(s.Logins) = 0 THEN 0 ELSE (CAST(SUM(s.ViewsLMonth) AS FLOAT) / CAST(SUM(s.Logins) AS FLOAT)) END AS DECIMAL(10,2)), '',
+				td	= SUM(CASE WHEN s.PrevLogins = 0 THEN 0 ELSE 1 END), '',
+				td	= SUM(s.ViewsPrevMonth), '',
+				td	= SUM(s.PrevLogins), '',
+				td	= CAST(CASE WHEN SUM(s.ViewsPrevMonth) = 0 OR SUM(s.PrevLogins) = 0 THEN 0 ELSE (CAST(SUM(s.ViewsPrevMonth) AS FLOAT) / CAST(SUM(s.PrevLogins) AS FLOAT)) END AS DECIMAL(10,2)), '',
+				td	= (SUM(s.ViewsLMonth) - SUM(s.ViewsPrevMonth)), '',
+				td	= CASE WHEN SUM(s.ViewsLMonth) = 0 THEN 'No views' ELSE s.CustMostViewed END, '',
+				td	= CASE WHEN SUM(s.ViewsLMonth) = 0 THEN 'No views' ELSE s.CustLeastViewed END
+			FROM #IFSViews s
+			GROUP BY s.CustomerName, s.CustMostViewed, s.CustLeastViewed
+			ORDER BY SUM(s.ViewsLMonth) DESC
+			FOR XML PATH('tr')) +
+		N'<tr></tr></table>' +
+		N'<br /><br />Reports not viewed for ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @MonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @MonthStart)) AS VARCHAR)) + '.<br /><br />' +
+		N'<table class="forceArial">' +
+		N'<thn>Customer</th>' +
+		N'<thn>Reports not viewed</th>' +
+		N'</tr>' +
+		(SELECT thn	= s.CustomerName, '',
+				td	= s.CustNotViewed
+			FROM #IFSViews s
+			GROUP BY s.CustomerName, s.CustNotViewed
+			FOR XML PATH('tr')) +
+		N'<tr></tr></table>' +
+		N'<br /><br />Reports not viewed in ' + (SELECT CAST(YEAR(CONVERT(DATE, @YearStart)) AS VARCHAR)) + '.<br /><br />' +
+		N'<table class="forceArial">' +
+		N'<thn>Customer</th>' +
+		N'<thn>Reports not viewed in ' + (SELECT CAST(YEAR(CONVERT(DATE, @YearStart)) AS VARCHAR)) + '</th>' +
+		N'</tr>' +
+		(SELECT thn	= s.CustomerName, '',
+				td	= s.NotViewedYear
+			FROM #IFSViews s
+			GROUP BY s.CustomerName, s.NotViewedYear
+			FOR XML PATH('tr')) +
+		N'<tr></tr></table>' +
+		N'<br /><br />Top users for ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @MonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @MonthStart)) AS VARCHAR)) + '.<br />' +
+		N'Dashboard views have been ignored<br /><br />' +
+		N'<table class="forceArial">' +
+		N'<tr>' +
+		N'<thn>Customer</th>' +
+		N'<thn>Employee</th>' +
+		N'<thn>Views ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @MonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @MonthStart)) AS VARCHAR)) + '</th>' +
+		N'<thn>Logins ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @MonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @MonthStart)) AS VARCHAR)) + '</th>' +
+		N'<thn>Ave. Views per login ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @MonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @MonthStart)) AS VARCHAR)) + '</th>' +
+		N'<thn>Views ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @PrevMonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @PrevMonthStart)) AS VARCHAR)) + '</th>' +
+		N'<thn>Logins ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @PrevMonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @PrevMonthStart)) AS VARCHAR)) + '</th>' +
+		N'<thn>Ave. Views per login ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @PrevMonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @PrevMonthStart)) AS VARCHAR)) + '</th>' +
+		N'<thn>Views diff per month</th>' +
+		N'<thn>Most Viewed Report ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @MonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @MonthStart)) AS VARCHAR)) + '</th>' +
+		N'<thn>Least Viewed Report ' + (SELECT (SUBSTRING(DATENAME(MONTH, CONVERT(DATE, @MonthStart)), 1, 3)) + ' ' + CAST(YEAR(CONVERT(DATE, @MonthStart)) AS VARCHAR)) + '</th>' +
+		N'</tr>' +
+		(SELECT TOP 20 thn = s.CustomerName, '',
+				td	= s.FirstName + ' ' + s.Surname, '',
+				td	= s.ViewsLMonth, '',
+				td	= s.Logins, '',
+				td	= CAST(CASE WHEN s.ViewsLMonth = 0 OR s.Logins = 0 THEN 0 ELSE (CAST(s.ViewsLMonth AS FLOAT) / CAST(s.Logins AS FLOAT)) END AS DECIMAL(10,2)), '',
+				td	= s.ViewsPrevMonth, '',
+				td	= s.PrevLogins, '',
+				td	= CAST(CASE WHEN s.ViewsPrevMonth = 0 OR s.PrevLogins = 0 THEN 0 ELSE (CAST(s.ViewsPrevMonth AS FLOAT) / CAST(s.PrevLogins AS FLOAT)) END AS DECIMAL(10,2)), '',
+				td	= (s.ViewsLMonth - s.ViewsPrevMonth), '',
+				td	= s.UserMostViewed, '',
+				td	= s.UserLeastViewed
+			FROM #IFSViews s
+			ORDER BY s.ViewsLMonth DESC
+			FOR XML PATH('tr')) +
+		N'<tr></tr>' +
+		N'</font>'
+
+	-- The following block is because Ideal Office viewport acts like IE6 and ignores basic css priority rules.
+	-- Replace the deliberately malformed thn tags (left column, for aligning to left)
+	SET @EmailHTML = REPLACE(@EmailHTML, '<thn>', '<th align=left>')
+	SET @EmailHTML = REPLACE(@EmailHTML, '</thn>', '</th>')
+
+	-- Email out the results
+	EXEC msdb.dbo.sp_send_dbmail
+		@body							= @EmailHTML,
+		@body_format					= 'HTML',
+		@recipients						= 'patrick.collins@idealhost.co.uk;daniel.marshall@idealhost.co.uk;rob.anderson@idealhost.co.uk;george.griffiths@idealhost.co.uk',
+--		@recipients						= 'george.griffiths@idealhost.co.uk',
+		@subject						= @EmailSubject
+		
+		

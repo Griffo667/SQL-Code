@@ -1,0 +1,72 @@
+﻿USE [FaceToFaceCa]
+GO
+/****** Object:  StoredProcedure [dbo].[IFSTelemetryExports]    Script Date: 14/11/2016 16:01:51 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER PROCEDURE [dbo].[IFSTelemetryExports]
+	@DatabaseName VARCHAR(100),
+	@FromDate DATE,
+	@ToDate DATE
+
+AS
+
+	SET NOCOUNT ON;
+	
+	-- ===========================================================================
+	-- Author:		George Griffiths
+	-- Create Date:		03-11-2016
+	-- Description:		Checks the Telemetry usage for exports
+	-- ===========================================================================
+	
+	-- Declare Vaibles being used
+
+
+	DECLARE @NameExport AS NVARCHAR(MAX) --Headings from row items
+	DECLARE @NameExportSQL AS NVARCHAR(MAX)
+	DECLARE @SQLQueryString AS NVARCHAR(MAX)
+	DECLARE @SQLParams AS NVARCHAR(MAX) = N'@cnt AS NVARCHAR(MAX) OUTPUT'
+
+	-- This section extracts the row data from WebItem table and stores it in one string
+	-- when the Type column is equal to 0
+
+	SELECT @NameExportSQL = 'SELECT @cnt = (STUFF((SELECT DISTINCT '','' + QUOTENAME(webi.[Name]) 
+							FROM [' + @DatabaseName + '].dbo.tlkpWebItem webi 
+							WHERE webi.[Type] = 0 
+							FOR XML PATH(''''), TYPE).value(''.'', ''NVARCHAR(MAX)''), 1, 1, '''')) '
+	EXECUTE sp_executesql @NameExportSQL, @SQLParams, @cnt = @NameExport OUTPUT
+
+	-- SQL query below extracts the report type from the XML code in the extended column of the 
+	-- Telemetry table and then counts how many reports have been exported of each type from 
+	-- the web portal.
+
+	SET @SQLQueryString =
+			N'WITH ReportTable AS ( ' +
+			N'SELECT webi.[Name], logtel.UserId, webi.Identifier ' +
+			N'FROM [' + @DatabaseName + '].dbo.tlkpWebItem webi ' +
+			N'LEFT JOIN [' + @DatabaseName + '].Logging.tblTelemetry logtel on webi.Identifier = ' +
+			--------------------------------------------------------------------------------------------------
+			---- This section converts the XML stored in the Telemetry table and extracts the report type ----
+			N'(Extended.value(''(//*[local-name()="ReportType"])[1]'', ''varchar(max)'')) ' +
+			---------------------------------------------------------------------------------------------------
+			N'WHERE webi.[Type] = 0 ' +
+			N'AND logtel.UserId IS NOT NULL ' +
+			N'AND logtel.CreateDate BETWEEN ''' + CONVERT(VARCHAR, @FromDate) + ''' AND ''' + CONVERT(VARCHAR, @ToDate) + ''' ' +
+			N') ' +
+		N'SELECT tuser.FirstName, tuser.Surname, ' +
+		N'SUM(CASE logtel.[Action] WHEN ''' + 'Export' + ''' THEN 1 ELSE 0 END) AS [ReportsExported], ' +
+		N'' + @NameExport + ' ' +
+		N'FROM [' + @DatabaseName + '].[dbo].[tblUser] tuser ' +
+		N'LEFT JOIN [' + @DatabaseName + '].Logging.tblTelemetry logtel ON logtel.[UserId] = tuser.Id ' +
+		N'INNER JOIN ( ' +
+			N'SELECT * FROM ReportTable ' +
+			N'PIVOT(COUNT(Identifier) FOR [Name] IN (' + @NameExport + ')) AS PivotReportTable ' +
+		N') ReportTable ON tuser.Id = ReportTable.UserId ' +
+		N'WHERE logtel.CreateDate BETWEEN ''' + CONVERT(VARCHAR, @FromDate) + ''' AND ''' + CONVERT(VARCHAR, @ToDate) + ''' ' +
+		N'AND tuser.Surname <> ''' + 'Admin' + ''' ' + 
+		N'AND tuser.Surname <> ''' + 'Administrator' + ''' ' +
+		N'GROUP BY tuser.Id, tuser.FirstName, tuser.Surname, ' + @NameExport + ' ' +
+		N'ORDER BY [ReportsExported] Desc '
+
+	EXEC(@SQLQueryString)
